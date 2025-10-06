@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>NASA Bio-RAG</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root { --gap: 16px; --card: #f4f5f7; --stroke:#e5e7eb; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: #fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+
+    /* GRID general: 2 columnas, pantalla completa sin scroll del body */
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 100vh;
+      gap: var(--gap);
+      padding: var(--gap);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Columna izquierda: chat a toda la altura */
+    .chat-col { display: flex; flex-direction: column; height: 100%; padding-bottom: 16px; }
+    .chat-history {
+      flex: 1; overflow: auto;
+      border: 1px solid var(--stroke);
+      border-radius: 12px; background: var(--card); padding: 12px;
+    }
+    .chat-input {
+      margin-top: var(--gap);
+      border: 1px solid var(--stroke); border-radius: 12px;
+      padding: 10px; display: flex; gap: 8px; background: #fff; align-items: flex-end;
+    }
+    .chat-input textarea {
+      flex: 1; border: none; resize: none; outline: none; font-size: 16px; max-height: 120px;
+    }
+    .chat-input button { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--stroke); background: #111827; color: #fff; cursor: pointer; }
+    .bubble { margin: 6px 0; padding: 10px 12px; border-radius: 12px; max-width: 92%; }
+    .bubble.user { background: #dbeafe; align-self: flex-end; }
+    .bubble.assistant { background: #e5e7eb; align-self: flex-start; }
+    .role { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+    /* opcional: estilo sutil para el loader */
+    .bubble.assistant.loading { opacity: 0.9; font-style: italic; }
+
+    /* Columna derecha: grafo arriba, PDFs abajo */
+    .right-col {
+      display: grid; grid-template-rows: 55% 45%;
+      gap: var(--gap); height: 100%;
+      min-height: 0; /* permite que hijos se encojan y hagan scroll */
+      padding-bottom: 16px;
+    }
+    .graph-card, .doc-card {
+      border: 1px solid var(--stroke); border-radius: 12px;
+      background: var(--card); padding: 10px; overflow: hidden;
+    }
+    .graph-card { min-height: 0; }
+
+    /* --- Toolbar de búsqueda sobre el grafo --- */
+    .graph-toolbar {
+      display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+    }
+    .graph-toolbar input {
+      flex: 1; padding: 8px 10px; border: 1px solid var(--stroke); border-radius: 10px; font-size: 14px; background: #fff;
+    }
+    .graph-toolbar button {
+      padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 10px; background: #fff; cursor: pointer;
+    }
+    #graph { width: 100%; height: calc(100% - 46px); }
+
+    /* --- Tarjeta de documentos (abajo derecha) --- */
+    .doc-card { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+    .doc-toolbar {
+      display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+    }
+    .doc-toolbar input {
+      flex: 1; padding: 8px 10px; border: 1px solid var(--stroke); border-radius: 10px; font-size: 14px; background: #fff;
+    }
+    .doc-toolbar button {
+      padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 10px; background: #fff; cursor: pointer;
+    }
+    .doc-body {
+      display: grid; grid-template-columns: 40% 60%; gap: 8px; height: 100%;
+      min-height: 0; /* clave en grids anidados */
+    }
+
+    /* Lista de resultados SCROLEABLE */
+    .doc-results {
+      background: #fff; border: 1px solid var(--stroke); border-radius: 10px;
+      padding: 6px; height: 100%; min-height: 0;
+      overflow-y: auto; overscroll-behavior: contain;
+    }
+    .doc-item {
+      padding: 10px 12px; border-radius: 8px; cursor: pointer; margin-bottom: 6px;
+      border: 1px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      background: #fff;
+    }
+    .doc-item:hover { background: #f3f4f6; }
+    .doc-item.active { background: #e5e7eb; border-color: #d1d5db; }
+
+    .doc-viewer {
+      display: grid; grid-template-rows: auto 1fr; gap: 6px;
+      min-width: 0; min-height: 0;
+    }
+    .doc-actions {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 12px; color: #6b7280;
+    }
+    #openExternal { text-decoration: none; color: #111827; border: 1px solid var(--stroke); padding: 6px 10px; border-radius: 8px; background: #fff; }
+    #pdfFrame { width: 100%; height: 100%; border: none; background: #fff; }
+
+    @media (max-width: 1100px) {
+      .grid { grid-template-columns: 1fr; grid-template-rows: 60vh 60vh; height: auto; overflow: auto; }
+      .right-col { grid-template-rows: 55% 45%; }
+      .doc-body { grid-template-columns: 1fr; grid-template-rows: 40% 60%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <!-- IZQUIERDA: CHAT -->
+    <section class="chat-col" aria-label="NASA Bio Chatbot">
+      <div id="chatHistory" class="chat-history" aria-live="polite"></div>
+      <div class="chat-input">
+        <textarea id="chatBox" rows="2" placeholder="Type your question"></textarea>
+        <button id="sendBtn">Send</button>
+      </div>
+    </section>
+
+    <!-- DERECHA: GRAFO (arriba) + DOCUMENTOS (abajo) -->
+    <section class="right-col">
+      <div class="graph-card">
+        <div class="graph-toolbar">
+          <input id="conceptInput" type="text" placeholder="Highlight concepts (e.g., microgravity muscle radiation)" />
+          <button id="clearHighlight">Clear</button>
+        </div>
+        <div id="graph" role="img" aria-label="Interactive Plotly graph"></div>
+      </div>
+
+      <div class="doc-card">
+        <div class="doc-toolbar">
+          <input id="docQuery" type="text" placeholder="Search document by name…" />
+          <button id="docSearchBtn">Search</button>
+        </div>
+        <div class="doc-body">
+          <div id="docResults" class="doc-results"></div>
+          <div class="doc-viewer">
+            <div class="doc-actions">
+              <span id="docInfo">Select a PDF to view its content</span>
+              <a id="openExternal" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">Open in new tab</a>
+            </div>
+            <iframe id="pdfFrame" title="PDF Viewer"></iframe>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const API_BASE = location.origin;
+
+    // ===== Utilidades de chat =====
+    const messages = [];
+    const chatHistoryEl = document.getElementById('chatHistory');
+    const chatBoxEl = document.getElementById('chatBox');
+    const sendBtnEl = document.getElementById('sendBtn');
+
+    function appendMessage(role, contentHTML) {
+      const wrap = document.createElement('div');
+      wrap.className = `bubble ${role}`;
+      const roleEl = document.createElement('div');
+      roleEl.className = 'role';
+      roleEl.textContent = role === 'user' ? 'You' : 'Assistant';
+      const contentEl = document.createElement('div');
+      contentEl.innerHTML = contentHTML;
+      wrap.prepend(roleEl);
+      wrap.appendChild(contentEl);
+      chatHistoryEl.appendChild(wrap);
+      chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
+    }
+
+    // Loader: "Loading", "Loading.", "Loading..", "Loading..."
+    function startLoadingBubble() {
+      const wrap = document.createElement('div');
+      wrap.className = 'bubble assistant loading';
+      const roleEl = document.createElement('div');
+      roleEl.className = 'role';
+      roleEl.textContent = 'Assistant';
+      const contentEl = document.createElement('div');
+      wrap.prepend(roleEl);
+      wrap.appendChild(contentEl);
+      chatHistoryEl.appendChild(wrap);
+      chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
+
+      const frames = ['Loading', 'Loading.', 'Loading..', 'Loading...'];
+      let idx = 0;
+      contentEl.textContent = frames[idx];
+      const timer = setInterval(() => {
+        idx = (idx + 1) % frames.length;
+        contentEl.textContent = frames[idx];
+      }, 350);
+
+      return {
+        stop() { clearInterval(timer); wrap.classList.remove('loading'); },
+        setHTML(html) { contentEl.innerHTML = html; },
+        element: wrap
+      };
+    }
+
+    async function sendMessage() {
+      const text = chatBoxEl.value.trim();
+      if (!text) return;
+      chatBoxEl.value = '';
+      sendBtnEl.disabled = true;
+
+      messages.push({ role: 'user', content: text });
+      appendMessage('user', marked.parse(text));
+
+      // Show loading animation
+      const loader = startLoadingBubble();
+
+      try {
+        const res = await fetch(`${API_BASE}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages })
+        });
+        const data = await res.json();
+        const md = data.answer_md || 'No response.';
+        messages.push({ role: 'assistant', content: md });
+
+        // Replace loader with the answer
+        loader.stop();
+        loader.setHTML(marked.parse(md));
+        chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
+      } catch (e) {
+        loader.stop();
+        loader.setHTML('⚠️ Error contacting the backend.');
+      } finally {
+        sendBtnEl.disabled = false;
+        chatBoxEl.focus();
+      }
+    }
+
+    sendBtnEl.addEventListener('click', sendMessage);
+    chatBoxEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    });
+
+    // ===== Graph + highlight =====
+    const NODE_TRACE_INDEX = 1;                 // [edges, nodes]
+    const DEFAULT_COLOR = '#9EA4A9';
+    const HIGHLIGHT_COLOR = '#FFA500';
+
+    let nodeTerms = [];
+    let baseColors = [];
+
+    function debounce(fn, ms=200) {
+      let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    function applyHighlight(query) {
+      const gd = document.getElementById('graph');
+      if (!gd || !gd.data || !gd.data[NODE_TRACE_INDEX]) return;
+
+      const tokens = (query || '')
+        .toLowerCase()
+        .split(/\s+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+
+      const colors = baseColors.slice();
+
+      if (tokens.length > 0) {
+        for (let i = 0; i < nodeTerms.length; i++) {
+          const terms = (nodeTerms[i] || []).map(t => String(t).toLowerCase());
+          const hit = tokens.some(tok => terms.some(t => t.includes(tok)));
+          if (hit) colors[i] = HIGHLIGHT_COLOR;
+        }
+      }
+
+      Plotly.restyle('graph', { 'marker.color': [colors] }, [NODE_TRACE_INDEX]);
+    }
+
+    async function loadGraph() {
+      try {
+        const res = await fetch(`${API_BASE}/api/graph`);
+        const data = await res.json();
+        const figJSON = JSON.parse(data.figure);
+        await Plotly.newPlot('graph', figJSON.data, figJSON.layout, {displayModeBar: true, responsive: true});
+
+        const gd = document.getElementById('graph');
+        nodeTerms = (gd.data[NODE_TRACE_INDEX].customdata || []).map(x => Array.isArray(x) ? x : [x]);
+        baseColors = new Array(nodeTerms.length).fill(DEFAULT_COLOR);
+        Plotly.restyle('graph', { 'marker.color': [baseColors] }, [NODE_TRACE_INDEX]);
+      } catch (e) {
+        document.getElementById('graph').innerHTML = 'Failed to load the graph.';
+      }
+    }
+
+    const conceptInput = document.getElementById('conceptInput');
+    const clearBtn = document.getElementById('clearHighlight');
+    conceptInput.addEventListener('input', debounce((e) => applyHighlight(e.target.value), 200));
+    clearBtn.addEventListener('click', () => { conceptInput.value = ''; applyHighlight(''); });
+    loadGraph();
+
+    // ===== PDF search =====
+    const docQueryEl = document.getElementById('docQuery');
+    const docSearchBtnEl = document.getElementById('docSearchBtn');
+    const docResultsEl = document.getElementById('docResults');
+    const pdfFrameEl = document.getElementById('pdfFrame');
+    const openExternalEl = document.getElementById('openExternal');
+    const docInfoEl = document.getElementById('docInfo');
+
+    let currentUrl = null;
+
+    function renderDocResults(items) {
+      docResultsEl.innerHTML = '';
+      if (!items || items.length === 0) {
+        docResultsEl.innerHTML = '<div class="doc-item">No PDFs found.</div>';
+        return;
+      }
+
+      items.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'doc-item';
+        div.textContent = item.name;
+        div.title = item.filename;
+        div.dataset.url = item.url;
+        div.addEventListener('click', () => openDoc(item));
+        docResultsEl.appendChild(div);
+      });
+    }
+
+    function setActiveItem(url) {
+      [...docResultsEl.querySelectorAll('.doc-item')].forEach(el => {
+        el.classList.toggle('active', el.dataset.url === url);
+      });
+    }
+
+    function openDoc(item) {
+      currentUrl = item.url;
+      pdfFrameEl.src = item.url;
+      openExternalEl.href = item.url;
+      openExternalEl.style.display = 'inline-block';
+      docInfoEl.textContent = item.filename;
+      setActiveItem(item.url);
+    }
+
+    async function searchDocs(autoOpenSingle = true) {
+      const q = docQueryEl.value.trim();
+      try {
+        const res = await fetch(`${API_BASE}/api/search_pdfs?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        const items = data.items || [];
+        renderDocResults(items);
+
+        // Auto-open if there is only one result
+        if (autoOpenSingle && items.length === 1) {
+          openDoc(items[0]);
+        }
+      } catch (e) {
+        docResultsEl.innerHTML = '<div class="doc-item">Error searching PDFs.</div>';
+      }
+    }
+
+    docSearchBtnEl.addEventListener('click', () => searchDocs(true));
+    docQueryEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); searchDocs(true); }
+    });
+
+    // First load: list all (sorted by most recent)
+    searchDocs(false);
+
+    // Welcome message
+    appendMessage('assistant', '👋 Welcome to the NASA Biosciences Intelligence Dashboard! Ask on the left; top-right highlight concepts in the graph; bottom-right search PDFs by name and open them to read.');
+  </script>
+</body>
+</html>
